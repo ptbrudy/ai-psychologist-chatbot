@@ -1,31 +1,145 @@
 import { createClient } from '@supabase/supabase-js';
 import { ChatMessage, ChatRole } from '../types';
 
+export type Json =
+  | string
+  | number
+  | boolean
+  | null
+  | { [key: string]: Json | undefined }
+  | Json[];
+
 export interface Database {
   public: {
     Tables: {
-      chat_history: {
+      profiles: {
         Row: {
-          id: number;
-          created_at: string;
-          user_id: string;
-          role: string;
-          content: string;
+          id: string;
+          email: string | null;
+          name: string | null;
         };
         Insert: {
-          id?: number;
-          created_at?: string;
-          user_id: string;
-          role: string;
-          content: string;
+          id: string;
+          email?: string | null;
+          name?: string | null;
         };
         Update: {
-          id?: number;
+          id?: string;
+          email?: string | null;
+          name?: string | null;
+        };
+        Relationships: [
+          {
+            foreignKeyName: 'profiles_id_fkey';
+            columns: ['id'];
+            isOneToOne: true;
+            referencedRelation: 'users';
+            referencedColumns: ['id'];
+          },
+        ];
+      };
+      sessions: {
+        Row: {
+          id: string;
+          user_id: string;
+          started_at: string;
+          ended_at: string | null;
+        };
+        Insert: {
+          id?: string;
+          user_id: string;
+          started_at?: string;
+          ended_at?: string | null;
+        };
+        Update: {
+          id?: string;
+          user_id?: string;
+          started_at?: string;
+          ended_at?: string | null;
+        };
+        Relationships: [
+          {
+            foreignKeyName: 'sessions_user_id_fkey';
+            columns: ['user_id'];
+            isOneToOne: false;
+            referencedRelation: 'users';
+            referencedColumns: ['id'];
+          },
+        ];
+      };
+      chat_logs: {
+        Row: {
+          id: string;
+          session_id: string;
+          user_id: string;
+          role: string;
+          message: string | null;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          session_id: string;
+          user_id: string;
+          role: string;
+          message?: string | null;
           created_at?: string;
+        };
+        Update: {
+          id?: string;
+          session_id?: string;
           user_id?: string;
           role?: string;
-          content?: string;
+          message?: string | null;
+          created_at?: string;
         };
+        Relationships: [
+          {
+            foreignKeyName: 'chat_logs_session_id_fkey';
+            columns: ['session_id'];
+            isOneToOne: false;
+            referencedRelation: 'sessions';
+            referencedColumns: ['id'];
+          },
+          {
+            foreignKeyName: 'chat_logs_user_id_fkey';
+            columns: ['user_id'];
+            isOneToOne: false;
+            referencedRelation: 'users';
+            referencedColumns: ['id'];
+          },
+        ];
+      };
+      moods: {
+        Row: {
+          id: string;
+          user_id: string;
+          date: string;
+          mood: string | null;
+          note: string | null;
+        };
+        Insert: {
+          id?: string;
+          user_id: string;
+          date: string;
+          mood?: string | null;
+          note?: string | null;
+        };
+        Update: {
+          id?: string;
+          user_id?: string;
+          date?: string;
+          mood?: string | null;
+          note?: string | null;
+        };
+        Relationships: [
+          {
+            foreignKeyName: 'moods_user_id_fkey';
+            columns: ['user_id'];
+            isOneToOne: false;
+            referencedRelation: 'users';
+            referencedColumns: ['id'];
+          },
+        ];
       };
     };
     Views: {
@@ -44,45 +158,54 @@ export interface Database {
 }
 
 // The App component now checks for these variables, so we can assume they exist here.
-const SUPABASE_URL = process.env.SUPABASE_URL!;
-const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY!;
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY;
 
-const supabase = createClient<Database>(SUPABASE_URL, SUPABASE_ANON_KEY);
+export const supabase = createClient<Database>(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 /**
- * Fetches chat history for a specific user.
- * @param userId The unique identifier for the user.
- * @returns A promise that resolves to an array of chat messages.
+ * Creates a new chat session for a user.
+ * @param userId The unique identifier for the user (from auth.uid()).
+ * @returns A promise that resolves to the new session's ID.
  */
-export const fetchChatHistory = async (userId: string): Promise<ChatMessage[]> => {
+export const createNewSession = async (userId: string): Promise<string | null> => {
   const { data, error } = await supabase
-    .from('chat_history')
-    .select('role, content')
-    .eq('user_id', userId)
-    .order('created_at', { ascending: true });
+    .from('sessions')
+    .insert({ user_id: userId })
+    .select('id')
+    .single();
 
+  // --- ERROR CONTROL: Log the detailed error but return null to signal failure to the caller. ---
   if (error) {
-    console.error("Error fetching chat history:", error);
-    // In case of error, return an empty array to allow the app to continue.
-    return [];
+    console.error("Error creating new session:", error);
+    return null;
   }
-  // Supabase may return null, so default to an empty array.
-  // We cast here because the DB schema uses a string for 'role', but our app uses the ChatRole enum.
-  // This is safe as long as the database only contains 'user' or 'model'.
-  return (data as ChatMessage[]) || [];
+  return data.id;
 };
 
 /**
  * Saves a single chat message to the database.
  * @param userId The unique identifier for the user.
+ * @param sessionId The unique identifier for the current chat session.
  * @param message The chat message object to save.
  */
-export const saveMessage = async (userId: string, message: ChatMessage) => {
-  const { error } = await supabase
-    .from('chat_history')
-    .insert([{ user_id: userId, role: message.role, content: message.content }]);
+export const saveChatMessage = async (userId: string, sessionId: string, message: ChatMessage): Promise<void> => {
+  // Map our internal 'model' role to the database's 'ai' role.
+  const dbRole = message.role === ChatRole.Model ? 'ai' : 'user';
 
+  const { error } = await supabase
+    .from('chat_logs')
+    .insert({ 
+      user_id: userId, 
+      session_id: sessionId, 
+      role: dbRole, 
+      message: message.content 
+    });
+  
+  // --- ERROR CONTROL: Throw the error so the calling function can handle it. ---
   if (error) {
     console.error("Error saving message:", error);
+    // This allows the UI to catch the error and inform the user.
+    throw new Error(error.message);
   }
 };
